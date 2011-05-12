@@ -1,0 +1,269 @@
+(* Formal Analysis of OpenID with GBA *)
+(* Written by Abu Shohel Ahmed and Peeter Laud *)
+(* Bootstrapping prove *)
+(* to run the code *)
+(* proverif -in pi filename*)
+
+
+param redundantHypElim = true.
+
+(* Functionality testing *)
+
+(* Constants *)
+
+free OCert,(* RCert,*) BCert, HCert.
+free RealmC, HUriMethod, GBAME, OKMsg.
+free BSFtoHSS, HSStoBSF.
+
+(* Internet *)
+
+free net.
+
+(* Channel for recording the names of honest parties (users) *)
+
+private free  honests.
+private free honests2.
+private free honests3.
+private free honests4.
+private free honests5.
+private free honests6.
+private free honests7.
+private free honests8.
+private free honests9.
+
+(* events *)
+
+fun UICCBegin/1.
+fun UICCEnd/1.
+fun BSFBegin/1.
+fun BSFEnd/1.
+
+
+(* asymmetric keys *)
+
+fun pk/1.
+fun tochannel/2.  (* used to create secure channels between two parties *)
+equation tochannel(x,pk(y)) = tochannel(y,pk(x)).
+fun enc/2.
+reduc dec(x,enc(pk(x),y)) = y.
+
+(* A TLS channel with server authentication *)
+(* Arguments: a nonce, and the public key of the server. *)
+(* The nonce is sent to the server encrypted with its public key *)
+fun tlschan/2.
+
+
+(* Diffie-Hellman *)
+fun dhf/2.
+fun dhg/1.
+equation dhf(x,dhg(y)) = dhf(y,dhg(x)).
+
+(* hashing *)
+fun hash/1.
+fun kf1/2.
+fun kf2/2.
+fun kf3/2.
+fun kf4/2.
+fun kf5/2.
+fun fks/2.
+
+(* base64 *)
+fun base64/1.
+reduc unbase64(base64(x)) = x.
+
+(* Simple certificates *)
+
+private fun cert/3.
+reduc readcert(cert(x,y,z)) = (x,y,z).
+
+(* secure channels *)
+
+(* Phone key management *)
+private fun impi2key/1.
+fun impi2sqn/1.           (* conservative *)
+fun masksqn/2.
+reduc unmasksqn(masksqn(x,y),y) = x.
+
+
+(* CA process *)
+
+let simpleca =
+  ! in(net, pubkey); new n; new attimpi;
+  (* BSF certificate is not availabe to attacker *)
+   out(net, cert(n,pubkey,BCert));
+   (* out(net, cert(n,pubkey,HCert)); *)
+   out(net, (attimpi,impi2key(attimpi)));   (* Not possible for attacker *)  
+   out(net, attimpi). 
+
+(* UE process *)
+
+let ue =
+  new impi;
+  ! (                                      (* UICC/GBA *)
+    (* GBA + UICC in this block *)
+    (* Step 6.1 *)
+   
+    event UICCBegin(impi);
+    out(net, impi);
+   
+    (* Step 7.2 *)
+    in(net, (rand,autn));
+    let k = impi2key(impi) in
+    let (maskedsqn,amf,maca) = autn in
+    let ak = kf5(k,rand) in
+    let mysqn = unmasksqn(maskedsqn,ak) in
+
+    (* sequence number *)    
+    in(honests5,=mysqn); (* the sequence number used by hss *)
+ 
+    (* if mysqn = impi2sqn(impi) then *)
+    (* if mysqn = sqn then *)
+    let xmaca = kf1(k,(mysqn,rand,amf)) in
+    if maca = xmaca then
+    let res = kf2(k,rand) in
+    let ck = kf3(k,rand) in
+    let ik = kf4(k,rand) in
+     
+     
+    (* step 8.1 *)
+    (* implements qop = auth-int *)
+    new cnonce;
+    new nonceCounter;
+    out(net, (cnonce,nonceCounter,rand,hash((hash((impi,RealmC,res)),rand,cnonce,nonceCounter,HUriMethod))));
+   
+    (* step 9.2 *)
+    (* Setup application specific key *)
+    in(net,(=cnonce,=nonceCounter,=rand,b64rand,hashofbase64rand)); 
+    if b64rand = base64(rand) then
+    if hashofbase64rand = hash((res,b64rand)) then 
+    out(net, OKMsg);
+    
+    event UICCEnd(impi)
+    ) | !out(honests3,impi). 
+  
+
+(* HSS *)
+let hss =
+  new hssid;
+ 
+  (* distribute hss certificate *)
+  new skhss;
+  let pkhss = pk(skhss) in
+  out(net, cert(hssid, pkhss,HCert));
+  ! (
+    (* Step 11.1 *)
+    (* Create two way channel with BSF *)
+    in(net, bsfcert);
+    let (bsfid,bsfpk,=BCert) = readcert(bsfcert) in
+    in(honests4, =bsfid); (* proof of honest bsf *)
+    let chwithbsf = tochannel(skhss,bsfpk) in
+    in(chwithbsf, (=BSFtoHSS, impi, =hssid, bsfnonce));
+    
+     
+    (* HSS operation *)
+    (* let sqn = impi2sqn(impi) in *)
+    (* Sequence number *)
+    new sqn;
+    out(honests5,sqn);
+
+    let k = impi2key(impi) in
+    new rand;
+    new amf;
+    let maca = kf1(k, (sqn,rand,amf)) in
+    let xres = kf2(k,rand) in
+    let ck = kf3(k, rand) in
+    let ik = kf4(k, rand) in
+    let ks = (ck,ik) in
+    let ak = kf5(k, rand) in
+    let autn = (masksqn(sqn,ak),amf,maca) in
+   
+    (* Step 12.2 *)
+    (* send to BSF *)
+    out(chwithbsf, (HSStoBSF,rand,autn,xres,ks,bsfnonce))
+ ) | !out(honests9,hssid). 
+
+
+
+(* BSF+HSS Process *)
+let bsfhss =
+  new bsfid;
+  
+ (* Distribute BSF certificate *)
+  new skbsf;
+  let pkbsf = pk(skbsf) in
+  out(net, cert(bsfid, pkbsf, BCert));
+  ! (
+    (* Step 6.2 *)
+    in(net, impi);
+    (* Consider BSF as a single block *)
+     
+
+
+    (* Tunnels *)
+    in(net, hsscert);
+    let (hssid,hssprpk,=HCert) = readcert(hsscert) in
+    in(honests9,=hssid);
+    let chwithhss = tochannel(skbsf,hssprpk) in
+
+    new bsfnonce;
+    out(chwithhss, (BSFtoHSS,impi, hssid, bsfnonce));
+    
+    in(chwithhss,(=HSStoBSF,rand,autn,xres,ks,=bsfnonce));    
+
+    (* Step 7.1 *)  
+    out(net, (rand,autn));
+
+    (* Step 8.2 *)
+     
+    in(net,(cnonce,nonceCounter,=rand,respfromuicc));
+
+    
+    (* Step 9.1 *)
+    if respfromuicc = hash((hash((impi,RealmC,xres)),rand,cnonce,nonceCounter,HUriMethod)) then
+
+    event BSFBegin(impi);
+    out(net,(cnonce,nonceCounter,rand,base64(rand),hash((xres,base64(rand)))));
+    in(honests3,=impi); 
+    event BSFEnd(impi)
+  ) | !out(honests4,bsfid).
+
+
+(* Property proof *)
+(* Correspondance property *)
+ query evinj:BSFEnd(c) ==> evinj:UICCBegin(c). 
+
+(* query evinj:UICCEnd(c) ==> evinj:BSFBegin(c). *) 
+
+(* query evinj:UICCEnd(c,s) ==> (evinj:BSFBegin(c,s) | (evinj:RecvSqnA(c,s) ==> ev:RecvSqnB(c,s))). *)
+
+(* Secrecy *)
+not honests.  (*  *)
+not honests2.  (* OP *)
+not honests3.  (* UE impi*)
+not honests4.   (* BSF *)
+not honests5.   (* HSS to UE for sequence number checking *)
+not honests6. (* RP id*)
+not honests7.  (* UE userid *)
+not honests8.
+not honests9.
+
+
+not impi2key(impi). (* master key *)
+not skbsf.
+not skhss.
+not kf2(impi2key(impi),rand).
+(* kf3, kf4 is CK and IK = Ks). Both secure means Ks Secure *)
+not kf3(impi2key(impi),rand).
+not kf4(impi2key(impi),rand).
+not kf5(impi2key(impi),rand).
+not (kf3(impi2key(impi),rand),kf4(impi2key(impi),rand)).
+not tochannel(skhss,pk(skbsf)).
+not tochannel(skbsf,pk(skhss)).
+not fks((kf3(impi2key(impi),rand),kf4(impi2key(impi),rand)),(GBAME,rand,impi,pk(sknaf))).
+not (hash((impi,RealmC,kf2(impi2key(impi),rand))),rand,HUriMethod).
+
+
+(* Multiple session *)
+process
+  simpleca |
+  (!ue) | (hss) | (!bsfhss)

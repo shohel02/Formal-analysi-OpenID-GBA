@@ -1,0 +1,469 @@
+(* Formal Analysis of OpenID with GBA *)
+(* Written by Abu Shohel Ahmed and Peeter Laud *)
+(* Prove of security properties in OpenID with GBA *)
+(* to run the code *)
+(* proverif -in pi filename*)
+
+(* For correspondance property in OpenID with GBA *)
+(* RPend means start from OPend *)
+(* OPend means its from UserEnd *)
+(* RPend means its from OPend and Userend *)
+
+param redundantHypElim = true.
+
+(* Functionality testing *)
+
+(* Constants *)
+
+free OCert,(* RCert,*) BCert, HCert.
+free RealmC, HUriMethod, GBAME, OKMsg.
+free BSFtoNAF, NAFtoBSF.
+free BSFtoHSS, HSStoBSF.
+
+(* Internet *)
+
+free net.
+
+(* Channel for recording the names of honest parties (users) *)
+
+private free  honests.
+private free honests2.
+private free honests3.
+private free honests4.
+private free honests5.
+private free honests6.
+private free honests7.
+private free honests8.
+private free honests9.
+
+(* application session keys *)
+private free KSNAF, ksnaf.
+
+(* events *)
+
+fun RPEnd/3.
+(* fun UserEnd/3. *)
+fun OPEnd/3.
+fun OPEndU/4.
+fun USEREndU/4.
+fun USEREndF/3.
+fun RPEndF/3.
+
+(* asymmetric keys *)
+
+fun pk/1.
+fun tochannel/2.  (* used to create secure channels between two parties *)
+equation tochannel(x,pk(y)) = tochannel(y,pk(x)).
+fun enc/2.
+reduc dec(x,enc(pk(x),y)) = y.
+
+(* A TLS channel with server authentication *)
+(* Arguments: a nonce, and the public key of the server. *)
+(* The nonce is sent to the server encrypted with its public key *)
+fun tlschan/2.
+
+
+(* Diffie-Hellman *)
+fun dhf/2.
+fun dhg/1.
+equation dhf(x,dhg(y)) = dhf(y,dhg(x)).
+
+(* hashing *)
+fun hash/1.
+fun kf1/2.
+fun kf2/2.
+fun kf3/2.
+fun kf4/2.
+fun kf5/2.
+fun fks/2.
+
+(* base64 *)
+fun base64/1.
+reduc unbase64(base64(x)) = x.
+
+(* Simple certificates *)
+
+private fun cert/3.
+reduc readcert(cert(x,y,z)) = (x,y,z).
+
+(* secure channels *)
+
+(* Phone key management *)
+private fun impi2key/1.
+private fun impi2uid/1.
+fun impi2sqn/1.           (* conservative *)
+fun masksqn/2.
+reduc unmasksqn(masksqn(x,y),y) = x.
+
+
+(* CA process *)
+
+let simpleca =
+  ! in(net, pubkey); new n; new attimpi;
+(*  out(net, cert(n,pubkey,RCert)); *)
+  out(net, cert(n,pubkey,OCert)); 
+ 
+  (* BSF certificate is not availabe to attacker *)
+  (* out(net, cert(n,pubkey,BCert)); *)
+   out(net, cert(n,pubkey,HCert)).
+(*   out(net, (attimpi,impi2key(attimpi)));
+   out(net, attimpi). *)
+
+(* UE process *)
+
+let ue =
+  new impi;
+  ! (                                      (* UE app / web browser *)
+    new userid;
+
+    (					(* real session starts here *)
+
+    (* The attacker choose address of RP *)
+    in(net, rpid);
+
+    (* Step 1.1 *)
+    (* Send user identifier to RP: Login request *)
+    new usessionid;   (* A browser session id *)
+    out(net,(userid,usessionid)); (* sessionid to protect csrf *)
+   
+    (* Step 2.2 *)
+    in(net, (=userid,=rpid,oidpr,dhhandle,=usessionid));
+
+    (* Step 2.3 *)
+    in(net, oidprcert);
+    let (=oidpr,oidpk,=OCert) = readcert(oidprcert) in 
+
+    (* Step 3.1 *)
+    (* Create TLS tunnel to OP *)  
+    new ue_tlsnonce;
+    out(net, enc(oidpk,ue_tlsnonce));
+ 
+    (* Step 4.1 *)
+    (* Send authentication request in to OP *)
+    
+    let chwithoidpr = tlschan(ue_tlsnonce,oidpk) in    
+    out(chwithoidpr, (userid,rpid,oidpr,dhhandle));
+ 
+    (* Step 5.2 *)
+    in(chwithoidpr, (=oidpr,oidprnonce));
+
+
+    (* GBA + UICC in this block *)
+    (* Step 6.1 *)
+    out(net, impi);
+   
+    (* Step 7.2 *)
+    in(net, (rand,autn));
+    let k = impi2key(impi) in
+    let (maskedsqn,amf,maca) = autn in
+    let ak = kf5(k,rand) in
+    let mysqn = unmasksqn(maskedsqn,ak) in
+
+    (* sequence number *)    
+    in(honests5,=mysqn); (* the sequence number used by hss *)
+ 
+    (* if mysqn = impi2sqn(impi) then *)
+    (* if mysqn = sqn then *)
+    let xmaca = kf1(k,(mysqn,rand,amf)) in
+    if maca = xmaca then
+    let res = kf2(k,rand) in
+    let ck = kf3(k,rand) in
+    let ik = kf4(k,rand) in
+     
+     
+    (* step 8.1 *)
+    (* implements qop = auth-int *)
+    new cnonce;
+    new nonceCounter;
+    out(net, (cnonce,nonceCounter,rand,hash((hash((impi,RealmC,res)),rand,cnonce,nonceCounter,HUriMethod))));
+   
+    (* step 9.2 *)
+    (* Setup application specific key *)
+    in(net,(=cnonce,=nonceCounter,=rand,b64rand,hashofbase64rand)); 
+    if b64rand = base64(rand) then
+    if hashofbase64rand = hash((res,b64rand)) then 
+    let ks=(ck,ik) in
+    let ksnaf = fks(ks,(GBAME,rand,impi,oidpr)) in
+
+    (* Step 10.1 *)
+    (* Send authentication request to OP *)
+    event USEREndF(impi,rpid,oidpr);  
+    out(chwithoidpr, (hash((hash((b64rand,oidpr,ksnaf)),oidprnonce,HUriMethod)),b64rand,oidprnonce, userid,rpid,oidpr,dhhandle));
+   
+    
+    (* step 13.2 *)
+    (* Read authentication reply from OP *)
+    in(chwithoidpr, (uid,rpid,oidpr,dhhandle,oidprnewnonce,hashonall));
+(*    event UserEnd(impi,rpid,oidpr); *)
+
+    (* Step 14.1 *)
+    (* redirect authentication reply to RP *)  
+   
+    out(net, (uid,rpid,oidpr,dhhandle,oidprnewnonce,hashonall))
+    ) 				(* real session ends here *)
+	| (!out(honests7, userid))
+    
+  ) | !out(honests3,impi). 
+  
+
+(* RP process *)
+let rp =
+   new rpid; 
+
+  ! (
+  
+    (* Step 1.2 *)
+    in(net, (userid,usessionid));
+  
+    (*Step 1.3 *)
+    (* simple discovery process. Consider OP endpoint URL is in oidpcert *)
+    in(net, oidprcert);
+    let (oidpr,oidprpk,=OCert) = readcert(oidprcert) in
+  
+    (* create DH association between  RP and OP *) 
+    new rp_tlsnonce;
+    out(net, enc(oidprpk,rp_tlsnonce));
+    let chwithoidpr = tlschan(rp_tlsnonce, oidprpk) in
+    new dhexp;
+    out(chwithoidpr, dhg(dhexp));
+    in(chwithoidpr, dhothergelem);
+    let kdh = dhf(dhexp, dhothergelem) in
+    let secrwop = hash(kdh) in
+
+    (* Step 2.1 *)
+    (* secrwop acts as a rpnonce, User authentication required *)
+    (* Redirect UE *)
+    out(net, (userid,rpid,oidpr,secrwop,usessionid));
+
+    (* Step 14.2 *)
+    (* authentication reply from OP via UE *)
+    in(net, (userid,=rpid,=oidpr,=secrwop,oidprnewnonce,hashonall));
+    
+    (* Step 15.1 *)
+    if hashonall = fks(kdh,(userid,rpid,oidpr,secrwop,oidprnewnonce)) then
+
+  
+    out(net, OKMsg);
+    (* Successful *)
+    (* why this is required ? prove OP is honest *)
+    in(honests2,=oidpr);  (* connected to honest OP *)
+(*    in(honests7,=userid); *)
+    event RPEndF(userid,rpid,oidpr) 
+  ).
+
+
+(* NAF+OP Process *)
+let nafop =
+  new nafid;
+ 
+  (* distribute OP certificate *)
+  new sknaf;
+  let pknaf = pk(sknaf) in
+  out(net, cert(nafid, pknaf,OCert));
+  ! (
+     
+    (* Step 1.3 continued *)
+    (* DH association over TLS tunnel*)
+    in(net, encdtlsnonce);
+    let tlsnonce = dec(sknaf,encdtlsnonce) in
+    let chwithrp = tlschan(tlsnonce,pknaf) in
+    new nafdhexp;
+    out(chwithrp, dhg(nafdhexp));
+    in(chwithrp, dhothergelem);
+    let kdh = dhf(nafdhexp, dhothergelem) in
+    let secrwrp = hash(kdh) in
+
+    (* Step 3.2 *)
+    (* TLS tunnel between RP and OP *) 
+    in(net, encdtlsnonce2);
+    let tlsnonce2 = dec(sknaf,encdtlsnonce2) in
+    let chwithuser=tlschan(tlsnonce2,pknaf) in
+
+    (* Step 4.2 *)
+    (* Authentication request from UE - HTTP Digest *)
+    in(chwithuser, (userid,rpid,=nafid,=secrwrp));
+
+ 
+ 
+    (* Step 5.1 *)
+    (* Send initial auth reply - HTTP 401 *)
+    new oidprnonce;
+    out(chwithuser, (nafid,oidprnonce));
+
+    (* Step 10.2 *)
+    (* Authentication request from UE *)
+    in(chwithuser, (hashresponse, b64rand,  =oidprnonce, =userid, =rpid, =nafid, =secrwrp));    
+
+    (* Step 11.1 *)
+    (* Create two way channel with BSF *)
+    in(net, bsfcert);
+    let (bsfid,bsfpk,=BCert) = readcert(bsfcert) in
+    
+    let chwithbsf = tochannel(sknaf,bsfpk) in
+    new bsfnonce;
+    out(chwithbsf, (NAFtoBSF, b64rand, nafid, bsfnonce));
+
+    (* Step 12.2 *)
+    (* Read KsNAF from BSF *)
+    in(chwithbsf, (=BSFtoNAF, ksnaf, impi, =bsfnonce));
+
+    
+    (* Step 13.1 *)
+    (* send authentication response to UE *)
+    if hashresponse = hash((hash((b64rand,nafid,ksnaf)),oidprnonce,HUriMethod)) then
+    let uid = impi2uid(impi) in (* added *)
+    (* in(honests4,=bsfid); *)
+    (* in(honests3,=impi); *)
+    event OPEnd(uid,b64rand,nafid); 
+    new oidprnewnonce;
+    out(chwithuser, (uid,rpid,nafid,secrwrp,oidprnewnonce,fks(kdh,(uid,rpid,nafid,secrwrp,oidprnewnonce))))
+    
+    
+     (* connected to honest bsf *)
+(*    event OPEndU(userid,impi,rpid,nafid)   *)
+  ) | !out(honests2, nafid). 
+
+
+(* HSS *)
+let hss =
+  new hssid;
+ 
+  (* distribute OP certificate *)
+  new skhss;
+  let pkhss = pk(skhss) in
+  out(net, cert(hssid, pkhss,HCert));
+  ! (
+    (* Step 11.1 *)
+    (* Create two way channel with BSF *)
+    in(net, bsfcert);
+    let (bsfid,bsfpk,=BCert) = readcert(bsfcert) in
+    in(honests4, =bsfid); (* proof of honest bsf *)
+    let chwithbsf = tochannel(skhss,bsfpk) in
+    in(chwithbsf, (=BSFtoHSS, impi, =hssid, bsfnonce));
+    
+     
+    (* HSS operation *)
+    (* let sqn = impi2sqn(impi) in *)
+    (* Sequence number *)
+    new sqn;
+    out(honests5,sqn);
+
+    let k = impi2key(impi) in
+    new rand;
+    new amf;
+    let maca = kf1(k, (sqn,rand,amf)) in
+    let xres = kf2(k,rand) in
+    let ck = kf3(k, rand) in
+    let ik = kf4(k, rand) in
+    let ks = (ck,ik) in
+    let ak = kf5(k, rand) in
+    let autn = (masksqn(sqn,ak),amf,maca) in
+   
+    (* Step 12.2 *)
+    (* send to BSF *)
+    out(chwithbsf, (HSStoBSF,rand,autn,xres,ks,bsfnonce))
+ ) | !out(honests9,hssid). 
+
+
+
+(* BSF+HSS Process *)
+let bsfhss =
+  new bsfid;
+  
+ (* Distribute BSF certificate *)
+  new skbsf;
+  let pkbsf = pk(skbsf) in
+  out(net, cert(bsfid, pkbsf, BCert));
+  ! (
+    (* Step 6.2 *)
+    in(net, impi);
+
+    (* constraint: Consider BSF as a single block, both are trusted *)
+    
+    (* Tunnels *)
+    in(net, hsscert);
+    let (hssid,hssprpk,=HCert) = readcert(hsscert) in
+    in(honests9,=hssid);
+    let chwithhss = tochannel(skbsf,hssprpk) in
+
+    new bsfnonce;
+    out(chwithhss, (BSFtoHSS,impi, hssid, bsfnonce));
+    
+    in(chwithhss,(=HSStoBSF,rand,autn,xres,ks,=bsfnonce));    
+
+    (* Step 7.1 *)  
+    out(net, (rand,autn));
+
+    (* Step 8.2 *)
+     
+    in(net,(cnonce,nonceCounter,=rand,respfromuicc));
+
+    
+    (* Step 9.1 *)
+    if respfromuicc = hash((hash((impi,RealmC,xres)),rand,cnonce,nonceCounter,HUriMethod)) then
+    out(net,(cnonce,nonceCounter,rand,base64(rand),hash((xres,base64(rand)))));
+
+    (* Step 11.2 *)
+    (* read cert of OP, tunnel request *)
+    in(net, oidcert);
+    let (oidpr,oidprpk,=OCert) = readcert(oidcert) in (*trust relationship with  OP+naf, should we add in(honests2,=oidpr) *)
+    let chwithoid = tochannel(skbsf,oidprpk) in
+    in(chwithoid, (=NAFtoBSF, b64rand, =oidpr, nfromoid));
+
+    (* Step 12.1 *)
+    (* Send KsNAF to OP *)
+    if b64rand = base64(rand) then
+    event BSFEnd(impi,b64rand);
+    let KSNAF = fks(ks,(GBAME,rand,impi,oidpr)) in
+    out(chwithoid, (BSFtoNAF, KSNAF,impi, nfromoid))
+  ) | !out(honests4,bsfid).
+
+
+(* Property proof *)
+(* Correspondance property *)
+ (* query evinj:RPEnd(u,r,o) ==> evinj:OPEnd(u,r,o). *)
+
+(* query evinj:OPEndU(u,i,r,o) ==> evinj:USEREndU(u,i,r,o). *)
+
+query evinj:RPEndF(u,r,o) ==>  evinj:USEREndF(i,r,o) & evinj:OPEnd(u,bt,o) & evinj:BSFEnd(i,bt).
+
+
+(* Secrecy *)
+not honests.  (*  *)
+not honests2.  (* OP *)
+not honests3.  (* UE impi*)
+not honests4.   (* BSF *)
+not honests5.   (* HSS to UE for sequence number checking *)
+not honests6. (* RP id*)
+not honests7.  (* UE userid *)
+not honests8.
+not honests9.
+
+(* application specific key *)
+not ksnaf.
+not KSNAF.
+not impi2key(impi).   (* master key *)
+
+not skbsf. 
+not sknaf.
+(* not skrp. *)
+not dhf(nafdhexp,dhg(dhexp)).
+not dhf(dhexp,dhg(nafdhexp)).
+not kf2(impi2key(impi),rand).
+
+(* session key *)
+not kf3(impi2key(impi),rand).
+not kf4(impi2key(impi),rand).
+
+not kf5(impi2key(impi),rand).
+not (kf3(impi2key(impi),rand),kf4(impi2key(impi),rand)).
+not tochannel(sknaf,pk(skbsf)).
+not tochannel(skbsf,pk(sknaf)).
+not fks((kf3(impi2key(impi),rand),kf4(impi2key(impi),rand)),(GBAME,rand,impi,pk(sknaf))).
+not (hash((impi,RealmC,kf2(impi2key(impi),rand))),rand,HUriMethod).
+
+
+(* Multiple session *)
+process
+  simpleca |
+  (!ue) | (!rp) | (!nafop) | (!bsfhss) | (hss)

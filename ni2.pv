@@ -1,0 +1,245 @@
+(* Formal Analysis of OpenID with GBA *)
+(* Written by Peeter Laud *)
+(* annonymity testing *)
+(* to run the code *)
+(* proverif -in pi ni2.pv*)
+
+
+param redundantHypElim = true.
+
+(* Functionality testing *)
+
+(* Constants *)
+
+free (* UCert, *) OCert, RCert, BCert.
+free RealmC, HUriMethod, GBAME, OKMsg.
+free BSFtoNAF, NAFtoBSF.
+
+(* Internet *)
+
+free net.
+
+(* Channel for recording the names of honest parties (users) *)
+
+private free moveimpi.
+
+(* events *)
+
+(* asymmetric keys *)
+
+fun pk/1.
+fun tochannel/2.  (* used to create secure channels between two parties *)
+equation tochannel(x,pk(y)) = tochannel(y,pk(x)).
+fun enc/2.
+reduc dec(x,enc(pk(x),y)) = y.
+
+(* A TLS channel with server authentication *)
+(* Arguments: a nonce, and the public key of the server. *)
+(* The nonce is sent to the server encrypted with its public key *)
+fun tlschan/2.
+
+(* Diffie-Hellman *)
+
+fun dhf/2.
+fun dhg/1.
+equation dhf(x,dhg(y)) = dhf(y,dhg(x)).
+
+(* hashing *)
+fun hash/1.
+fun kf1/2.
+fun kf2/2.
+fun kf3/2.
+fun kf4/2.
+fun kf5/2.
+fun fks/2.
+
+(* base64 *)
+fun base64/1.
+reduc unbase64(base64(x)) = x.
+
+(* Simple certificates *)
+
+private fun cert/3.
+reduc readcert(cert(x,y,z)) = (x,y,z).
+
+(* secure channels *)
+
+(* Phone key management *)
+
+private fun impi2key/1.
+fun impi2sqn/1.           (* conservative *)
+fun masksqn/2.
+reduc unmasksqn(masksqn(x,y),y) = x.
+
+(* CA process *)
+
+let simpleca =
+  ! in(net, pubkey); new n; new attimpi;
+  out(net, cert(n,pubkey,RCert));
+  out(net, cert(n,pubkey,OCert));
+(*  out(net, cert(n,pubkey,BCert)); *)
+  out(net, (attimpi,impi2key(attimpi))). 
+
+private free impi.
+
+(* UE process *)
+
+let ue =
+(*  new impi; *)
+  ! (                                      (* UE app / web browser *)
+    new userid;
+    in(net, rpid);
+    in(net, oidprcert);
+    let (oidpr,oidpk,=OCert) = readcert(oidprcert) in
+    new usessionid;   (* commentshohel - added - a session id *)
+    (* out(net,(userid,oidpr)); *)
+    out(net,(userid,oidpr,usessionid)); (* commentshohel- session is added to protect csrf *)
+    in(net, (=userid,=rpid,=oidpr,dhhandle,=usessionid)); (* commentshohel *)
+    new ue_tlsnonce;
+    out(net, enc(oidpk,ue_tlsnonce));
+    let chwithoidpr = tlschan(ue_tlsnonce,oidpk) in
+    out(chwithoidpr, (userid,rpid,oidpr,dhhandle));
+    (* in(chwithoidpr, (=userid,=rpid,=oidpr,=dhhandle,oidprnonce)); *)
+    in(chwithoidpr, (=oidpr,oidprnonce));
+
+    (* GBA + UICC in this block *)
+    out(moveimpi, impi);
+    in(net, (rand,autn));
+    let k = impi2key(impi) in
+    let (maskedsqn,amf,maca) = autn in
+    let ak = kf5(k,rand) in
+    let mysqn = unmasksqn(maskedsqn,ak) in
+    if mysqn = impi2sqn(impi) then
+    let xmaca = kf1(k,(mysqn,rand,amf)) in
+    if maca = xmaca then
+    let res = kf2(k,rand) in
+    let ck = kf3(k,rand) in
+    let ik = kf4(k,rand) in
+    out(net, hash((hash((impi,RealmC,res)),rand,HUriMethod)));
+    in(net, b64rand);
+    if b64rand = base64(rand) then
+    let ks=(ck,ik) in
+    let ksnaf = fks(ks,(GBAME,rand,impi,oidpr)) in
+
+
+    (* out(chwithoidpr, (b64rand,RealmC,ksnaf,oidprnonce,HUriMethod,userid,rpid,oidpr,dhhandle)); *)
+    out(chwithoidpr, (hash((hash((b64rand,oidpr,ksnaf)),oidprnonce,HUriMethod)),b64rand,oidprnonce, userid,rpid,oidpr,dhhandle));
+    (* modified *)
+    in(chwithoidpr, (=userid,=rpid,=oidpr,=dhhandle,oidprnewnonce,hashonall));
+    out(net, (userid,rpid,oidpr,dhhandle,oidprnewnonce,hashonall))
+  ).
+  
+
+let rp =
+  new rpid;
+  new skrp;
+  let pkrp = pk(skrp) in
+  out(net, cert(rpid, pkrp,RCert));
+  ! (
+    in(net, (userid,oidpr,usessionid));
+    in(net, oidprcert);
+    let (=oidpr,oidprpk,=OCert) = readcert(oidprcert) in
+    new rp_tlsnonce;
+    out(net, enc(oidprpk,rp_tlsnonce));
+    let chwithoidpr = tlschan(rp_tlsnonce, oidprpk) in
+    new dhexp;
+    out(chwithoidpr, dhg(dhexp));
+    in(chwithoidpr, dhothergelem);
+    let kdh = dhf(dhexp, dhothergelem) in
+    let secrwop = hash(kdh) in
+    out(net, (userid,rpid,oidpr,secrwop,usessionid));
+    in(net, (=userid,=rpid,=oidpr,=secrwop,oidprnewnonce,hashonall));
+    if hashonall = fks(kdh,(userid,rpid,oidpr,secrwop,oidprnewnonce)) then
+    out(net, OKMsg)
+  ).
+
+
+let nafop =
+  new nafid;
+  new sknaf;
+  let pknaf = pk(sknaf) in
+  out(net, cert(nafid, pknaf,OCert));
+  ! (
+    in(net, encdtlsnonce);
+    let tlsnonce = dec(sknaf,encdtlsnonce) in
+    let chwithrp = tlschan(tlsnonce,pknaf) in
+    new nafdhexp;
+    out(chwithrp, dhg(nafdhexp));
+    in(chwithrp, dhothergelem);
+    let kdh = dhf(nafdhexp, dhothergelem) in
+    let secrwrp = hash(kdh) in
+    in(net, encdtlsnonce2);
+    let tlsnonce2 = dec(sknaf,encdtlsnonce2) in
+    let chwithuser=tlschan(tlsnonce2,pknaf) in
+    in(chwithuser, (userid,rpid,=nafid,=secrwrp)); 
+    new oidprnonce;
+    (* out(chwithuser, (userid,rpid,nafid,secrwrp,oidprnonce)); *)
+    out(chwithuser, (nafid,oidprnonce)); (* modified *)
+    (* in(chwithuser, (b64rand, =RealmC, ksnaf, =oidprnonce, =HUriMethod, =userid, =rpid, =nafid, =secrwrp)); *)
+    in(chwithuser, (hashresponse, b64rand,  =oidprnonce, =userid, =rpid, =nafid, =secrwrp));    
+    in(net, bsfcert);
+    let (dummy1,bsfpk,=BCert) = readcert(bsfcert) in
+    let chwithbsf = tochannel(sknaf,bsfpk) in
+    new bsfnonce;
+    out(chwithbsf, (NAFtoBSF, b64rand, nafid, bsfnonce));
+    in(chwithbsf, (=BSFtoNAF, ksnaf, =bsfnonce)); (* modified *)
+    if hashresponse = hash((hash((b64rand,nafid,ksnaf)),oidprnonce,HUriMethod)) then
+    new oidprnewnonce; (* added *)
+    out(chwithuser, (userid,rpid,nafid,secrwrp,oidprnewnonce,fks(kdh,(userid,rpid,nafid,secrwrp,oidprnewnonce))))
+  ).
+
+
+let bsfhss =
+  new bsfid;
+  new skbsf;
+  let pkbsf = pk(skbsf) in
+  out(net, cert(bsfid, pkbsf, BCert));
+  ! (
+    in(moveimpi, impi);
+    let sqn = impi2sqn(impi) in
+    let k = impi2key(impi) in
+    new rand;
+    new amf;
+    let maca = kf1(k, (sqn,rand,amf)) in
+    let xres = kf2(k,rand) in
+    let ck = kf3(k, rand) in
+    let ik = kf4(k, rand) in
+    let ks = (ck,ik) in
+    let ak = kf5(k, rand) in
+    let autn = (masksqn(sqn,ak),amf,maca) in
+    out(net, (rand,autn));
+    in(net,respfromuicc);
+    if respfromuicc = hash((hash((impi,RealmC,xres)),rand,HUriMethod)) then
+    out(net, base64(rand));
+    in(net, oidcert);
+    let (oidpr,oidprpk,=OCert) = readcert(oidcert) in
+    let chwithoid = tochannel(skbsf,oidprpk) in
+    in(chwithoid, (=NAFtoBSF, b64rand, =oidpr, nfromoid));
+    if b64rand = base64(rand) then
+    let ksNAF = fks(ks,(GBAME,rand,impi,oidpr)) in
+    out(chwithoid, (BSFtoNAF, ksNAF, nfromoid))
+  ).
+
+noninterf impi.
+
+not moveimpi.
+(* not honests2. *)
+not impi2key(impi).
+not skbsf.
+not sknaf.
+(* not skrp.
+not dhf(nafdhexp,dhg(dhexp)).
+not dhf(dhexp,dhg(nafdhexp)). *)
+not kf2(impi2key(impi),rand).
+not kf3(impi2key(impi),rand).
+not kf4(impi2key(impi),rand).
+not kf5(impi2key(impi),rand).
+not (kf3(impi2key(impi),rand),kf4(impi2key(impi),rand)).
+not tochannel(sknaf,pk(skbsf)).
+not tochannel(skbsf,pk(sknaf)).
+not fks((kf3(impi2key(impi),rand),kf4(impi2key(impi),rand)),(GBAME,rand,impi,pk(sknaf))).
+not (hash((impi,RealmC,kf2(impi2key(impi),rand))),rand,HUriMethod).
+
+process
+  simpleca |
+  (!ue) | (!nafop) | bsfhss

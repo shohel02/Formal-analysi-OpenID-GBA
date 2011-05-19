@@ -1,0 +1,9 @@
+How to run the Code:
+
+1. Install ProVerif from http://www.proverif.ens.fr/
+2. Download the code from repository
+3. Run the code using 
+
+> ./proverif -in pi name_of_the_file
+
+For further questions, email at aahmed@cc.hut.fi
